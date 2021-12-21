@@ -206,6 +206,7 @@ class BeamSearchScorer(BeamScorer):
         input_ids: torch.LongTensor,
         next_scores: torch.FloatTensor,
         next_tokens: torch.LongTensor,
+        next_probs: torch.FloatTensor,
         next_indices: torch.LongTensor,
         pad_token_id: Optional[int] = None,
         eos_token_id: Optional[int] = None,
@@ -228,6 +229,8 @@ class BeamSearchScorer(BeamScorer):
         next_beam_scores = torch.zeros((batch_size, self.group_size), dtype=next_scores.dtype, device=device)
         next_beam_tokens = torch.zeros((batch_size, self.group_size), dtype=next_tokens.dtype, device=device)
         next_beam_indices = torch.zeros((batch_size, self.group_size), dtype=next_indices.dtype, device=device)
+        # TODO(vocab)
+        next_beam_probs = torch.zeros((batch_size, self.group_size, 31), dtype=next_probs.dtype, device=device)
 
         for batch_idx, beam_hyp in enumerate(self._beam_hyps):
             if self._done[batch_idx]:
@@ -239,6 +242,7 @@ class BeamSearchScorer(BeamScorer):
                 next_beam_scores[batch_idx, :] = 0
                 next_beam_tokens[batch_idx, :] = pad_token_id
                 next_beam_indices[batch_idx, :] = 0
+                next_beam_probs[batch_idx, :, pad_token_id] = 1.0
                 continue
 
             # next tokens for this sentence
@@ -256,12 +260,20 @@ class BeamSearchScorer(BeamScorer):
                     beam_hyp.add(
                         input_ids[batch_beam_idx].clone(),
                         next_score.item(),
+                        next_probs[next_index.item()].clone(),
                     )
                 else:
+                    # TODO(vocab)
+                    start = (next_index.item()) * 31
+                    end = start + 31
                     # add next predicted token since it is not eos_token
                     next_beam_scores[batch_idx, beam_idx] = next_score
                     next_beam_tokens[batch_idx, beam_idx] = next_token
                     next_beam_indices[batch_idx, beam_idx] = batch_beam_idx
+                    d = next_probs[batch_idx, start:end]
+                    # k = torch.topk(d, 2 * 3, largest=True, sorted=True)
+                    # print(f"  {beam_idx}  p={d.argmax().item()}", f"gt={next_token.item()}", k.indices, next_index.item())
+                    next_beam_probs[batch_idx, beam_idx] = d
                     beam_idx += 1
 
                 # once the beam for next step is full, don't add more tokens to it.
@@ -283,12 +295,15 @@ class BeamSearchScorer(BeamScorer):
                 "next_beam_scores": next_beam_scores.view(-1),
                 "next_beam_tokens": next_beam_tokens.view(-1),
                 "next_beam_indices": next_beam_indices.view(-1),
+                # TODO(vocab)
+                "next_beam_probs": next_beam_probs.view(-1, 31),
             }
         )
 
     def finalize(
         self,
         input_ids: torch.LongTensor,
+        probs: torch.FloatTensor,
         final_beam_scores: torch.FloatTensor,
         final_beam_tokens: torch.LongTensor,
         final_beam_indices: torch.LongTensor,
@@ -309,11 +324,12 @@ class BeamSearchScorer(BeamScorer):
                 batch_beam_idx = batch_idx * self.num_beams + beam_id
                 final_score = final_beam_scores[batch_beam_idx].item()
                 final_tokens = input_ids[batch_beam_idx]
-                beam_hyp.add(final_tokens, final_score)
+                final_probs = probs[batch_beam_idx]
+                beam_hyp.add(final_tokens, final_score, final_probs)
 
         # select the best hypotheses
         sent_lengths = input_ids.new(batch_size * self.num_beam_hyps_to_keep)
-        best = []
+        best, best_probs = [], []
         best_scores = torch.zeros(batch_size * self.num_beam_hyps_to_keep, device=self.device, dtype=torch.float32)
 
         # retrieve best hypotheses
@@ -323,28 +339,37 @@ class BeamSearchScorer(BeamScorer):
                 best_hyp_tuple = sorted_hyps.pop()
                 best_score = best_hyp_tuple[0]
                 best_hyp = best_hyp_tuple[1]
+                best_prob = best_hyp_tuple[2]
                 sent_lengths[self.num_beam_hyps_to_keep * i + j] = len(best_hyp)
 
                 # append to lists
                 best.append(best_hyp)
+                best_probs.append(best_prob)
                 best_scores[i * self.num_beam_hyps_to_keep + j] = best_score
 
         # prepare for adding eos
         sent_max_len = min(sent_lengths.max().item() + 1, max_length)
         decoded: torch.LongTensor = input_ids.new(batch_size * self.num_beam_hyps_to_keep, sent_max_len)
+        # TODO(vocab)
+        decoded_probs: torch.FloatTensor = probs.new(batch_size * self.num_beam_hyps_to_keep, sent_max_len, 31)
+
         # shorter batches are padded if needed
         if sent_lengths.min().item() != sent_lengths.max().item():
             assert pad_token_id is not None, "`pad_token_id` has to be defined"
             decoded.fill_(pad_token_id)
+            decoded_probs[..., pad_token_id] = 1.0
 
         # fill with hypotheses and eos_token_id if the latter fits in
-        for i, hypo in enumerate(best):
+        for i, (hypo, hypo_probs) in enumerate(zip(best, best_probs)):
             decoded[i, : sent_lengths[i]] = hypo
+            decoded_probs[i, : sent_lengths[i]] = hypo_probs
             if sent_lengths[i] < max_length:
                 decoded[i, sent_lengths[i]] = eos_token_id
+                decoded_probs[i, sent_lengths[i], eos_token_id] = 1.0
         return UserDict(
             {
                 "sequences": decoded,
+                "sequences_probs": decoded_probs,
                 "sequence_scores": best_scores,
             }
         )
@@ -367,15 +392,15 @@ class BeamHypotheses:
         """
         return len(self.beams)
 
-    def add(self, hyp: torch.LongTensor, sum_logprobs: float):
+    def add(self, hyp: torch.LongTensor, sum_logprobs: float, probs: torch.FloatTensor):
         """
         Add a new hypothesis to the list.
         """
         score = sum_logprobs / (hyp.shape[-1] ** self.length_penalty)
         if len(self) < self.num_beams or score > self.worst_score:
-            self.beams.append((score, hyp))
+            self.beams.append((score, hyp, probs))
             if len(self) > self.num_beams:
-                sorted_next_scores = sorted([(s, idx) for idx, (s, _) in enumerate(self.beams)])
+                sorted_next_scores = sorted([(s, idx) for idx, (s, _, _) in enumerate(self.beams)])
                 del self.beams[sorted_next_scores[0][1]]
                 self.worst_score = sorted_next_scores[1][0]
             else:
