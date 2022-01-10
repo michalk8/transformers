@@ -1170,6 +1170,7 @@ class GenerationMixin:
                 length_penalty=length_penalty,
                 do_early_stopping=early_stopping,
                 num_beam_hyps_to_keep=num_return_sequences,
+                vocab_size=self.config.decoder.vocab_size,
             )
             # 11. interleave input_ids with `num_beams` additional sequences per batch
             input_ids, model_kwargs = self._expand_inputs_for_generation(
@@ -1204,6 +1205,7 @@ class GenerationMixin:
                 device=self.device,
                 length_penalty=length_penalty,
                 do_early_stopping=early_stopping,
+                vocab_size=self.config.decoder.vocab_size,
             )
 
             # 12. interleave input_ids with `num_beams` additional sequences per batch
@@ -1249,6 +1251,7 @@ class GenerationMixin:
                 do_early_stopping=early_stopping,
                 num_beam_hyps_to_keep=num_return_sequences,
                 num_beam_groups=num_beam_groups,
+                vocab_size=self.config.decoder.vocab_size,
             )
             # 11. interleave input_ids with `num_beams` additional sequences per batch
             input_ids, model_kwargs = self._expand_inputs_for_generation(
@@ -1862,7 +1865,7 @@ class GenerationMixin:
             warnings.warn("You don't have defined any stopping_criteria, this will likely loop forever", UserWarning)
         pad_token_id = pad_token_id if pad_token_id is not None else self.config.pad_token_id
         eos_token_id = eos_token_id if eos_token_id is not None else self.config.eos_token_id
-        sos_token_id = self.config.sos_token_id
+        bos_token_id = self.config.bos_token_id
         output_scores = output_scores if output_scores is not None else self.config.output_scores
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
@@ -1899,10 +1902,9 @@ class GenerationMixin:
         beam_scores[:, 1:] = -1e9
         beam_scores = beam_scores.view((batch_size * num_beams,))
 
-        # TODO(vocab)
-        beam_probs = torch.zeros((batch_size, num_beams, 31), dtype=torch.float, device=input_ids.device)
-        beam_probs[:, 0, sos_token_id] = 1.0
-        beam_probs = beam_probs.view((batch_size * num_beams, 1, 31))
+        beam_probs = torch.zeros((batch_size, num_beams, self.config.decoder.vocab_size), dtype=torch.float, device=input_ids.device)
+        beam_probs[:, 0, bos_token_id] = 1.0
+        beam_probs = beam_probs.view((batch_size * num_beams, 1, self.config.decoder.vocab_size))
 
         this_peer_finished = False  # used by synced_gpus only
         while True:

@@ -158,6 +158,7 @@ class BeamSearchScorer(BeamScorer):
         do_early_stopping: Optional[bool] = False,
         num_beam_hyps_to_keep: Optional[int] = 1,
         num_beam_groups: Optional[int] = 1,
+        vocab_size: Optional[int] = None,
         **kwargs,
     ):
         self.num_beams = num_beams
@@ -167,6 +168,7 @@ class BeamSearchScorer(BeamScorer):
         self.num_beam_hyps_to_keep = num_beam_hyps_to_keep
         self.num_beam_groups = num_beam_groups
         self.group_size = self.num_beams // self.num_beam_groups
+        self.vocab_size = vocab_size
 
         self._is_init = False
         self._beam_hyps = [
@@ -229,8 +231,7 @@ class BeamSearchScorer(BeamScorer):
         next_beam_scores = torch.zeros((batch_size, self.group_size), dtype=next_scores.dtype, device=device)
         next_beam_tokens = torch.zeros((batch_size, self.group_size), dtype=next_tokens.dtype, device=device)
         next_beam_indices = torch.zeros((batch_size, self.group_size), dtype=next_indices.dtype, device=device)
-        # TODO(vocab)
-        next_beam_probs = torch.zeros((batch_size, self.group_size, 31), dtype=next_probs.dtype, device=device)
+        next_beam_probs = torch.zeros((batch_size, self.group_size, self.vocab_size), dtype=next_probs.dtype, device=device)
 
         for batch_idx, beam_hyp in enumerate(self._beam_hyps):
             if self._done[batch_idx]:
@@ -263,9 +264,8 @@ class BeamSearchScorer(BeamScorer):
                         next_probs[next_index.item()].clone(),
                     )
                 else:
-                    # TODO(vocab)
-                    start = (next_index.item()) * 31
-                    end = start + 31
+                    start = (next_index.item()) * self.vocab_size
+                    end = start + self.vocab_size
                     # add next predicted token since it is not eos_token
                     next_beam_scores[batch_idx, beam_idx] = next_score
                     next_beam_tokens[batch_idx, beam_idx] = next_token
@@ -295,8 +295,7 @@ class BeamSearchScorer(BeamScorer):
                 "next_beam_scores": next_beam_scores.view(-1),
                 "next_beam_tokens": next_beam_tokens.view(-1),
                 "next_beam_indices": next_beam_indices.view(-1),
-                # TODO(vocab)
-                "next_beam_probs": next_beam_probs.view(-1, 31),
+                "next_beam_probs": next_beam_probs.view(-1, self.vocab_size),
             }
         )
 
@@ -350,8 +349,7 @@ class BeamSearchScorer(BeamScorer):
         # prepare for adding eos
         sent_max_len = min(sent_lengths.max().item() + 1, max_length)
         decoded: torch.LongTensor = input_ids.new(batch_size * self.num_beam_hyps_to_keep, sent_max_len)
-        # TODO(vocab)
-        decoded_probs: torch.FloatTensor = probs.new(batch_size * self.num_beam_hyps_to_keep, sent_max_len, 31)
+        decoded_probs: torch.FloatTensor = probs.new(batch_size * self.num_beam_hyps_to_keep, sent_max_len, self.vocab_size)
 
         # shorter batches are padded if needed
         if sent_lengths.min().item() != sent_lengths.max().item():
