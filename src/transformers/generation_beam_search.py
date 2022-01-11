@@ -233,6 +233,7 @@ class BeamSearchScorer(BeamScorer):
         next_beam_indices = torch.zeros((batch_size, self.group_size), dtype=next_indices.dtype, device=device)
         next_beam_probs = torch.zeros((batch_size, self.group_size, self.vocab_size), dtype=next_probs.dtype, device=device)
 
+
         for batch_idx, beam_hyp in enumerate(self._beam_hyps):
             if self._done[batch_idx]:
                 if self.num_beams < len(beam_hyp):
@@ -247,6 +248,12 @@ class BeamSearchScorer(BeamScorer):
                 continue
 
             # next tokens for this sentence
+
+            _ = """
+            from collections import defaultdict
+            cnt = defaultdict(lambda: -1)
+            """
+
             beam_idx = 0
             for beam_token_rank, (next_token, next_score, next_index) in enumerate(
                 zip(next_tokens[batch_idx], next_scores[batch_idx], next_indices[batch_idx])
@@ -271,9 +278,18 @@ class BeamSearchScorer(BeamScorer):
                     next_beam_tokens[batch_idx, beam_idx] = next_token
                     next_beam_indices[batch_idx, beam_idx] = batch_beam_idx
                     d = next_probs[batch_idx, start:end]
-                    # k = torch.topk(d, 2 * 3, largest=True, sorted=True)
-                    # print(f"  {beam_idx}  p={d.argmax().item()}", f"gt={next_token.item()}", k.indices, next_index.item())
-                    next_beam_probs[batch_idx, beam_idx] = d
+                    # sanity/debugging checks
+                    _ = """
+                    k = torch.topk(d, 2 * 3, largest=True, sorted=True)
+                    cnt[int(next_index.item())] += 1
+                    pred = k.indices[cnt[int(next_index.item())]]
+
+                    assert next_token.item() == pred, (next_token.item(), pred)
+
+                    print(f"   batch={batch_idx} beam={beam_idx} rank={beam_token_rank} "
+                          f"gt={next_token.item()} pred={pred}, mass={round(float(d.sum()), 2)}", k.indices, next_index.item())
+                    """
+                    next_beam_probs[batch_idx, beam_idx] = d.clone()
                     beam_idx += 1
 
                 # once the beam for next step is full, don't add more tokens to it.

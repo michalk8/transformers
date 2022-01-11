@@ -1903,7 +1903,7 @@ class GenerationMixin:
         beam_scores = beam_scores.view((batch_size * num_beams,))
 
         beam_probs = torch.zeros((batch_size, num_beams, self.config.decoder.vocab_size), dtype=torch.float, device=input_ids.device)
-        beam_probs[:, 0, bos_token_id] = 1.0
+        beam_probs[:, :, bos_token_id] = 1.0
         beam_probs = beam_probs.view((batch_size * num_beams, 1, self.config.decoder.vocab_size))
 
         this_peer_finished = False  # used by synced_gpus only
@@ -1919,7 +1919,7 @@ class GenerationMixin:
                 if this_peer_finished_flag.item() == 0.0:
                     break
 
-            model_inputs = self.prepare_inputs_for_generation(input_ids, **model_kwargs)
+            model_inputs = self.prepare_inputs_for_generation(input_ids, input_probs=beam_probs, **model_kwargs)
 
             outputs = self(
                 **model_inputs,
@@ -1987,10 +1987,10 @@ class GenerationMixin:
             beam_scores = beam_outputs["next_beam_scores"]
             beam_next_tokens = beam_outputs["next_beam_tokens"]
             beam_idx = beam_outputs["next_beam_indices"]
-            bp = beam_outputs["next_beam_probs"]
+            bp = beam_outputs["next_beam_probs"]  # (bs * num_beams, num_toks)
 
             input_ids = torch.cat([input_ids[beam_idx, :], beam_next_tokens.unsqueeze(-1)], dim=-1)
-            beam_probs = torch.cat([beam_probs[beam_idx, :], bp.unsqueeze(1)], dim=1)
+            beam_probs = torch.cat([beam_probs[beam_idx, :], bp.unsqueeze(1)], dim=1)  # (bs * num_beams, sl, num_toks)
 
             model_kwargs = self._update_model_kwargs_for_generation(
                 outputs, model_kwargs, is_encoder_decoder=self.config.is_encoder_decoder
