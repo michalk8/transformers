@@ -1395,10 +1395,10 @@ class GenerationMixin:
 
         # keep track of which sequences are already finished
         unfinished_sequences = input_ids.new(input_ids.shape[0]).fill_(1)
+        input_probs: torch.FloatTensor = torch.nn.functional.one_hot(input_ids, self.config.decoder.vocab_size).float()
         cur_len = input_ids.shape[-1]
 
         this_peer_finished = False  # used by synced_gpus only
-        input_probs: Optional[torch.FloatTensor] = None
         while True:
 
             if synced_gpus:
@@ -1453,13 +1453,8 @@ class GenerationMixin:
 
             # argmax
             next_tokens = torch.argmax(next_tokens_scores, dim=-1)
-
-            if input_probs is None:
-                # (bs, 1, num_toks)
-                input_probs = next_tokens_probs.unsqueeze(1)
-            else:
-                # (bs, sl, num_toks)
-                input_probs = torch.cat([input_probs, next_tokens_probs.unsqueeze(1)], dim=1)
+            # (bs, sl, num_toks)
+            input_probs = torch.cat([input_probs, next_tokens_probs.unsqueeze(1)], dim=1)
 
             # finished sentences should have their next token be a padding token
             if eos_token_id is not None:
@@ -1645,11 +1640,11 @@ class GenerationMixin:
 
         # keep track of which sequences are already finished
         unfinished_sequences = input_ids.new(input_ids.shape[0]).fill_(1)
+        input_probs: torch.FloatTensor = torch.nn.functional.one_hot(input_ids, self.config.decoder.vocab_size).float()
         cur_len = input_ids.shape[-1]
 
         this_peer_finished = False  # used by synced_gpus only
         # auto-regressive generation
-        input_probs: Optional[torch.FloatTensor] = None
         while True:
 
             if synced_gpus:
@@ -1713,12 +1708,8 @@ class GenerationMixin:
 
             # update generated ids, model inputs, and length for next step
             input_ids = torch.cat([input_ids, next_tokens[:, None]], dim=-1)
-            if input_probs is None:
-                # (bs, 1, num_toks)
-                input_probs = probs.unsqueeze(1)
-            else:
-                # (bs, sl, num_toks)
-                input_probs = torch.cat([input_probs, probs.unsqueeze(1)], dim=1)
+            # (bs, sl, num_toks)
+            input_probs = torch.cat([input_probs, probs.unsqueeze(1)], dim=1)
             model_kwargs = self._update_model_kwargs_for_generation(
                 outputs, model_kwargs, is_encoder_decoder=self.config.is_encoder_decoder
             )
