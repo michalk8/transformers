@@ -1639,6 +1639,7 @@ class GenerationMixin:
 
         this_peer_finished = False  # used by synced_gpus only
         # auto-regressive generation
+        input_probs = None
         while True:
 
             if synced_gpus:
@@ -1652,7 +1653,7 @@ class GenerationMixin:
                     break
 
             # prepare model inputs
-            model_inputs = self.prepare_inputs_for_generation(input_ids, **model_kwargs)
+            model_inputs = self.prepare_inputs_for_generation(input_ids, input_probs=input_probs, **model_kwargs)
 
             # forward pass to get next token
             outputs = self(
@@ -1702,6 +1703,12 @@ class GenerationMixin:
 
             # update generated ids, model inputs, and length for next step
             input_ids = torch.cat([input_ids, next_tokens[:, None]], dim=-1)
+            if input_probs is None:
+                # (bs, 1, num_toks)
+                input_probs = probs.unsqueeze(1)
+            else:
+                # (bs, sl, num_toks)
+                input_probs = torch.cat([input_probs, probs.unsqueeze(1)], dim=1)
             model_kwargs = self._update_model_kwargs_for_generation(
                 outputs, model_kwargs, is_encoder_decoder=self.config.is_encoder_decoder
             )
@@ -1737,7 +1744,7 @@ class GenerationMixin:
                     hidden_states=decoder_hidden_states,
                 )
         else:
-            return input_ids
+            return input_ids, input_probs
 
     def beam_search(
         self,

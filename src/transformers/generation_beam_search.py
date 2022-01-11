@@ -233,7 +233,6 @@ class BeamSearchScorer(BeamScorer):
         next_beam_indices = torch.zeros((batch_size, self.group_size), dtype=next_indices.dtype, device=device)
         next_beam_probs = torch.zeros((batch_size, self.group_size, self.vocab_size), dtype=next_probs.dtype, device=device)
 
-
         for batch_idx, beam_hyp in enumerate(self._beam_hyps):
             if self._done[batch_idx]:
                 if self.num_beams < len(beam_hyp):
