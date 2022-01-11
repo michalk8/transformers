@@ -1398,6 +1398,7 @@ class GenerationMixin:
         cur_len = input_ids.shape[-1]
 
         this_peer_finished = False  # used by synced_gpus only
+        input_probs: Optional[torch.FloatTensor] = None
         while True:
 
             if synced_gpus:
@@ -1411,7 +1412,7 @@ class GenerationMixin:
                     break
 
             # prepare model inputs
-            model_inputs = self.prepare_inputs_for_generation(input_ids, **model_kwargs)
+            model_inputs = self.prepare_inputs_for_generation(input_ids, input_probs=input_probs, **model_kwargs)
 
             # forward pass to get next token
             outputs = self(
@@ -1447,9 +1448,18 @@ class GenerationMixin:
 
             # pre-process distribution
             next_tokens_scores = logits_processor(input_ids, next_token_logits)
+            # (bs, num_toks)
+            next_tokens_probs = torch.nn.functional.softmax(next_tokens_scores, dim=-1)
 
             # argmax
             next_tokens = torch.argmax(next_tokens_scores, dim=-1)
+
+            if input_probs is None:
+                # (bs, 1, num_toks)
+                input_probs = next_tokens_probs.unsqueeze(1)
+            else:
+                # (bs, sl, num_toks)
+                input_probs = torch.cat([input_probs, next_tokens_probs.unsqueeze(1)], dim=1)
 
             # finished sentences should have their next token be a padding token
             if eos_token_id is not None:
@@ -1494,7 +1504,7 @@ class GenerationMixin:
                     hidden_states=decoder_hidden_states,
                 )
         else:
-            return input_ids
+            return input_ids, input_probs
 
     def sample(
         self,
@@ -1639,7 +1649,7 @@ class GenerationMixin:
 
         this_peer_finished = False  # used by synced_gpus only
         # auto-regressive generation
-        input_probs = None
+        input_probs: Optional[torch.FloatTensor] = None
         while True:
 
             if synced_gpus:
