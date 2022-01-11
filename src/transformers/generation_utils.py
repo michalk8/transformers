@@ -1395,7 +1395,7 @@ class GenerationMixin:
 
         # keep track of which sequences are already finished
         unfinished_sequences = input_ids.new(input_ids.shape[0]).fill_(1)
-        input_probs: torch.FloatTensor = torch.nn.functional.one_hot(input_ids, self.config.decoder.vocab_size).float()
+        input_probs: torch.FloatTensor = nn.functional.one_hot(input_ids, self.config.decoder.vocab_size).float()
         cur_len = input_ids.shape[-1]
 
         this_peer_finished = False  # used by synced_gpus only
@@ -1449,7 +1449,7 @@ class GenerationMixin:
             # pre-process distribution
             next_tokens_scores = logits_processor(input_ids, next_token_logits)
             # (bs, num_toks)
-            next_tokens_probs = torch.nn.functional.softmax(next_tokens_scores, dim=-1)
+            next_tokens_probs = nn.functional.softmax(next_tokens_scores, dim=-1)
 
             # argmax
             next_tokens = torch.argmax(next_tokens_scores, dim=-1)
@@ -1640,7 +1640,7 @@ class GenerationMixin:
 
         # keep track of which sequences are already finished
         unfinished_sequences = input_ids.new(input_ids.shape[0]).fill_(1)
-        input_probs: torch.FloatTensor = torch.nn.functional.one_hot(input_ids, self.config.decoder.vocab_size).float()
+        input_probs: torch.FloatTensor = nn.functional.one_hot(input_ids, self.config.decoder.vocab_size).float()
         cur_len = input_ids.shape[-1]
 
         this_peer_finished = False  # used by synced_gpus only
@@ -2494,6 +2494,7 @@ class GenerationMixin:
             )
             stopping_criteria = validate_stopping_criteria(stopping_criteria, max_length)
         pad_token_id = pad_token_id if pad_token_id is not None else self.config.pad_token_id
+        bos_token_id = self.config.decoder.bos_token_id
         eos_token_id = eos_token_id if eos_token_id is not None else self.config.eos_token_id
         output_scores = output_scores if output_scores is not None else self.config.output_scores
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
@@ -2536,6 +2537,11 @@ class GenerationMixin:
         beam_scores[:, ::num_sub_beams] = 0
         beam_scores = beam_scores.view((batch_size * num_beams,))
 
+        beam_probs = torch.zeros((batch_size, num_beams, self.config.decoder.vocab_size), dtype=torch.float,
+                                 device=input_ids.device)
+        beam_probs[:, ::num_sub_beams, bos_token_id] = 1.0
+        beam_probs = beam_probs.view((batch_size * num_beams, 1, self.config.decoder.vocab_size))
+
         this_peer_finished = False  # used by synced_gpus only
         while True:
 
@@ -2556,7 +2562,7 @@ class GenerationMixin:
             reordering_indices = torch.zeros(batch_size * num_beams, dtype=torch.long, device=device)
 
             # do one decoder step on all beams of all sentences in batch
-            model_inputs = self.prepare_inputs_for_generation(input_ids, **model_kwargs)
+            model_inputs = self.prepare_inputs_for_generation(input_ids, input_probs=beam_probs, **model_kwargs)
             outputs = self(
                 **model_inputs,
                 return_dict=True,
@@ -2606,8 +2612,11 @@ class GenerationMixin:
                 if output_scores:
                     processed_score[batch_group_indices] = next_token_scores
 
+                # (bs * gs, num_toks)
+                next_token_probs = nn.functional.softmax(next_token_scores, dim=1)
                 # reshape for beam search
                 next_token_scores = next_token_scores.view(batch_size, group_size * vocab_size)
+                next_token_probs = next_token_probs.view(batch_size, group_size * vocab_size)
 
                 next_token_scores, next_tokens = torch.topk(
                     next_token_scores, 2 * group_size, dim=1, largest=True, sorted=True
@@ -2621,6 +2630,7 @@ class GenerationMixin:
                     group_input_ids,
                     next_token_scores,
                     next_tokens,
+                    next_token_probs,
                     next_indices,
                     pad_token_id=pad_token_id,
                     eos_token_id=eos_token_id,
@@ -2628,8 +2638,10 @@ class GenerationMixin:
                 beam_scores[batch_group_indices] = beam_outputs["next_beam_scores"]
                 beam_next_tokens = beam_outputs["next_beam_tokens"]
                 beam_idx = beam_outputs["next_beam_indices"]
+                bp = beam_outputs["next_beam_probs"]
 
                 input_ids[batch_group_indices] = group_input_ids[beam_idx]
+                beam_probs[batch_group_indices] = bp[beam_idx].unsqueeze(1)
                 group_input_ids = torch.cat([group_input_ids[beam_idx, :], beam_next_tokens.unsqueeze(-1)], dim=-1)
                 current_tokens[batch_group_indices] = group_input_ids[:, -1]
 
@@ -2676,6 +2688,7 @@ class GenerationMixin:
 
         sequence_outputs = beam_scorer.finalize(
             input_ids,
+            beam_probs,
             beam_scores,
             next_tokens,
             next_indices,
@@ -2707,7 +2720,7 @@ class GenerationMixin:
                     hidden_states=decoder_hidden_states,
                 )
         else:
-            return sequence_outputs["sequences"]
+            return sequence_outputs["sequences"], sequence_outputs["sequences_probs"]
 
 
 def top_k_top_p_filtering(
