@@ -2187,6 +2187,7 @@ class GenerationMixin:
             stopping_criteria = validate_stopping_criteria(stopping_criteria, max_length)
         pad_token_id = pad_token_id if pad_token_id is not None else self.config.pad_token_id
         eos_token_id = eos_token_id if eos_token_id is not None else self.config.eos_token_id
+        bos_token_id = self.config.bos_token_id
         output_scores = output_scores if output_scores is not None else self.config.output_scores
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
@@ -2217,6 +2218,11 @@ class GenerationMixin:
         beam_scores = torch.zeros((batch_size, num_beams), dtype=torch.float, device=input_ids.device)
         beam_scores = beam_scores.view((batch_size * num_beams,))
 
+        beam_probs = torch.zeros((batch_size, num_beams, self.config.decoder.vocab_size), dtype=torch.float,
+                                 device=input_ids.device)
+        beam_probs[:, :, bos_token_id] = 1.0
+        beam_probs = beam_probs.view((batch_size * num_beams, 1, self.config.decoder.vocab_size))
+
         this_peer_finished = False  # used by synced_gpus only
         while True:
 
@@ -2230,7 +2236,7 @@ class GenerationMixin:
                 if this_peer_finished_flag.item() == 0.0:
                     break
 
-            model_inputs = self.prepare_inputs_for_generation(input_ids, **model_kwargs)
+            model_inputs = self.prepare_inputs_for_generation(input_ids, input_probs=beam_probs, **model_kwargs)
 
             outputs = self(
                 **model_inputs,
@@ -2294,6 +2300,7 @@ class GenerationMixin:
                 input_ids,
                 next_token_scores,
                 next_tokens,
+                probs,  # next_token_probs
                 next_indices,
                 pad_token_id=pad_token_id,
                 eos_token_id=eos_token_id,
@@ -2301,8 +2308,10 @@ class GenerationMixin:
             beam_scores = beam_outputs["next_beam_scores"]
             beam_next_tokens = beam_outputs["next_beam_tokens"]
             beam_idx = beam_outputs["next_beam_indices"]
+            bp = beam_outputs["next_beam_probs"]  # (bs * num_beams, num_toks)
 
             input_ids = torch.cat([input_ids[beam_idx, :], beam_next_tokens.unsqueeze(-1)], dim=-1)
+            beam_probs = torch.cat([beam_probs[beam_idx, :], bp.unsqueeze(1)], dim=1)  # (bs * num_beams, sl, num_toks)
 
             model_kwargs = self._update_model_kwargs_for_generation(
                 outputs, model_kwargs, is_encoder_decoder=self.config.is_encoder_decoder
@@ -2321,6 +2330,7 @@ class GenerationMixin:
 
         sequence_outputs = beam_scorer.finalize(
             input_ids,
+            beam_probs,
             beam_scores,
             next_tokens,
             next_indices,
@@ -2352,7 +2362,7 @@ class GenerationMixin:
                     hidden_states=decoder_hidden_states,
                 )
         else:
-            return sequence_outputs["sequences"]
+            return sequence_outputs["sequences"], sequence_outputs["sequences_probs"]
 
     def group_beam_search(
         self,
