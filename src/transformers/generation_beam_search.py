@@ -208,7 +208,7 @@ class BeamSearchScorer(BeamScorer):
         input_ids: torch.LongTensor,
         next_scores: torch.FloatTensor,
         next_tokens: torch.LongTensor,
-        next_probs: torch.FloatTensor,
+        next_probs: torch.FloatTensor,  # (bs * n_beam, n_vocab)
         next_indices: torch.LongTensor,
         pad_token_id: Optional[int] = None,
         eos_token_id: Optional[int] = None,
@@ -232,6 +232,8 @@ class BeamSearchScorer(BeamScorer):
         next_beam_tokens = torch.zeros((batch_size, self.group_size), dtype=next_tokens.dtype, device=device)
         next_beam_indices = torch.zeros((batch_size, self.group_size), dtype=next_indices.dtype, device=device)
         next_beam_probs = torch.zeros((batch_size, self.group_size, self.vocab_size), dtype=next_probs.dtype, device=device)
+
+        # debug_next_probs = next_probs.view(batch_size, -1)
 
         for batch_idx, beam_hyp in enumerate(self._beam_hyps):
             if self._done[batch_idx]:
@@ -267,16 +269,16 @@ class BeamSearchScorer(BeamScorer):
                     beam_hyp.add(
                         input_ids[batch_beam_idx].clone(),
                         next_score.item(),
-                        next_probs[next_index.item()].clone(),
+                        next_probs[batch_beam_idx].clone(),
                     )
                 else:
-                    start = (next_index.item()) * self.vocab_size
-                    end = start + self.vocab_size
+                    # start = (next_index.item()) * self.vocab_size
+                    # end = start + self.vocab_size
                     # add next predicted token since it is not eos_token
                     next_beam_scores[batch_idx, beam_idx] = next_score
                     next_beam_tokens[batch_idx, beam_idx] = next_token
                     next_beam_indices[batch_idx, beam_idx] = batch_beam_idx
-                    d = next_probs[batch_idx, start:end]
+                    # d = debug_next_probs[batch_idx, start:end]
                     # sanity/debugging checks
                     _ = """
                     k = torch.topk(d, 2 * 3, largest=True, sorted=True)
@@ -288,7 +290,8 @@ class BeamSearchScorer(BeamScorer):
                     print(f"   batch={batch_idx} beam={beam_idx} rank={beam_token_rank} "
                           f"gt={next_token.item()} pred={pred}, mass={round(float(d.sum()), 2)}", k.indices, next_index.item())
                     """
-                    next_beam_probs[batch_idx, beam_idx] = d.clone()
+                    # assert (d == next_probs[batch_beam_idx]).all()
+                    next_beam_probs[batch_idx, beam_idx] = next_probs[batch_beam_idx].clone()
                     beam_idx += 1
 
                 # once the beam for next step is full, don't add more tokens to it.

@@ -1973,7 +1973,7 @@ class GenerationMixin:
             vocab_size = next_token_scores.shape[-1]
             next_token_probs = nn.functional.softmax(next_token_scores, dim=1)
             next_token_scores = next_token_scores.view(batch_size, num_beams * vocab_size)
-            next_token_probs = next_token_probs.view(batch_size, num_beams * vocab_size)
+            next_token_probs = next_token_probs.view(batch_size * num_beams, vocab_size)
 
             next_token_scores, next_tokens = torch.topk(
                 next_token_scores, 2 * num_beams, dim=1, largest=True, sorted=True
@@ -2301,7 +2301,7 @@ class GenerationMixin:
                 input_ids,
                 next_token_scores,
                 next_tokens,
-                probs,  # next_token_probs
+                probs.view(batch_size * num_beams, vocab_size),  # next_token_probs
                 next_indices,
                 pad_token_id=pad_token_id,
                 eos_token_id=eos_token_id,
@@ -2616,7 +2616,7 @@ class GenerationMixin:
                 next_token_probs = nn.functional.softmax(next_token_scores, dim=1)
                 # reshape for beam search
                 next_token_scores = next_token_scores.view(batch_size, group_size * vocab_size)
-                next_token_probs = next_token_probs.view(batch_size, group_size * vocab_size)
+                next_token_probs = next_token_probs.view(batch_size * group_size, vocab_size)
 
                 next_token_scores, next_tokens = torch.topk(
                     next_token_scores, 2 * group_size, dim=1, largest=True, sorted=True
