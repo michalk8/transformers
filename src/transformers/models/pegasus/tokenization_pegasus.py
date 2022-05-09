@@ -117,9 +117,10 @@ class PegasusTokenizer(PreTrainedTokenizer):
     ) -> None:
         self.offset = offset
         if additional_special_tokens is not None:
-            assert isinstance(
-                additional_special_tokens, list
-            ), f"additional_special_tokens should be of type {type(list)}, but is {type(additional_special_tokens)}"
+            if not isinstance(additional_special_tokens, list):
+                raise TypeError(
+                    f"additional_special_tokens should be of type {type(list)}, but is {type(additional_special_tokens)}"
+                )
 
             additional_special_tokens_extended = (
                 ([mask_token_sent] + additional_special_tokens)
@@ -285,7 +286,11 @@ class PegasusTokenizer(PreTrainedTokenizer):
             save_directory, (filename_prefix + "-" if filename_prefix else "") + VOCAB_FILES_NAMES["vocab_file"]
         )
 
-        if os.path.abspath(self.vocab_file) != os.path.abspath(out_vocab_file):
+        if os.path.abspath(self.vocab_file) != os.path.abspath(out_vocab_file) and os.path.isfile(self.vocab_file):
             copyfile(self.vocab_file, out_vocab_file)
+        elif not os.path.isfile(self.vocab_file):
+            with open(out_vocab_file, "wb") as fi:
+                content_spiece_model = self.sp_model.serialized_model_proto()
+                fi.write(content_spiece_model)
 
         return (out_vocab_file,)

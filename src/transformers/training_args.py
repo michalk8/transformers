@@ -23,7 +23,15 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .debug_utils import DebugOption
-from .file_utils import (
+from .trainer_utils import (
+    EvaluationStrategy,
+    FSDPOption,
+    HubStrategy,
+    IntervalStrategy,
+    SchedulerType,
+    ShardedDDPOption,
+)
+from .utils import (
     ExplicitEnum,
     cached_property,
     get_full_repo_name,
@@ -33,20 +41,18 @@ from .file_utils import (
     is_torch_bf16_available,
     is_torch_tf32_available,
     is_torch_tpu_available,
+    logging,
     torch_required,
 )
-from .trainer_utils import EvaluationStrategy, HubStrategy, IntervalStrategy, SchedulerType, ShardedDDPOption
-from .utils import logging
 
 
 if is_torch_available():
     import torch
+    import torch.distributed as dist
 
 if is_torch_tpu_available():
     import torch_xla.core.xla_model as xm
 
-if is_sagemaker_dp_enabled():
-    import smdistributed.dataparallel.torch.distributed as sm_dist
 
 if is_sagemaker_mp_enabled():
     import smdistributed.modelparallel.torch as smp
@@ -77,8 +83,10 @@ class OptimizerNames(ExplicitEnum):
 
     ADAMW_HF = "adamw_hf"
     ADAMW_TORCH = "adamw_torch"
+    ADAMW_TORCH_XLA = "adamw_torch_xla"
     ADAMW_APEX_FUSED = "adamw_apex_fused"
     ADAFACTOR = "adafactor"
+    ADAMW_BNB = "adamw_bnb_8bit"
 
 
 @dataclass
@@ -100,16 +108,16 @@ class TrainingArguments:
         do_train (`bool`, *optional*, defaults to `False`):
             Whether to run training or not. This argument is not directly used by [`Trainer`], it's intended to be used
             by your training/evaluation scripts instead. See the [example
-            scripts](https://github.com/huggingface/transformers/tree/master/examples) for more details.
+            scripts](https://github.com/huggingface/transformers/tree/main/examples) for more details.
         do_eval (`bool`, *optional*):
             Whether to run evaluation on the validation set or not. Will be set to `True` if `evaluation_strategy` is
             different from `"no"`. This argument is not directly used by [`Trainer`], it's intended to be used by your
             training/evaluation scripts instead. See the [example
-            scripts](https://github.com/huggingface/transformers/tree/master/examples) for more details.
+            scripts](https://github.com/huggingface/transformers/tree/main/examples) for more details.
         do_predict (`bool`, *optional*, defaults to `False`):
             Whether to run predictions on the test set or not. This argument is not directly used by [`Trainer`], it's
             intended to be used by your training/evaluation scripts instead. See the [example
-            scripts](https://github.com/huggingface/transformers/tree/master/examples) for more details.
+            scripts](https://github.com/huggingface/transformers/tree/main/examples) for more details.
         evaluation_strategy (`str` or [`~trainer_utils.IntervalStrategy`], *optional*, defaults to `"no"`):
             The evaluation strategy to adopt during training. Possible values are:
 
@@ -137,6 +145,9 @@ class TrainingArguments:
             Number of predictions steps to accumulate the output tensors for, before moving the results to the CPU. If
             left unset, the whole predictions are accumulated on GPU/TPU before being moved to the CPU (faster but
             requires more memory).
+        eval_delay (`float`, *optional*):
+            Number of epochs or steps to wait for before the first evaluation can be performed, depending on the
+            evaluation_strategy.
         learning_rate (`float`, *optional*, defaults to 5e-5):
             The initial learning rate for [`AdamW`] optimizer.
         weight_decay (`float`, *optional*, defaults to 0):
@@ -219,6 +230,10 @@ class TrainingArguments:
         seed (`int`, *optional*, defaults to 42):
             Random seed that will be set at the beginning of training. To ensure reproducibility across runs, use the
             [`~Trainer.model_init`] function to instantiate the model if it has some randomly initialized parameters.
+        data_seed (`int`, *optional*):
+            Random seed to be used with data samplers. If not set, random generators for data sampling will use the
+            same seed as `seed`. This can be used to ensure reproducibility of data sampling, independent of the model
+            seed.
         bf16 (`bool`, *optional*, defaults to `False`):
             Whether to use bf16 16-bit (mixed) precision training instead of 32-bit training. Requires Ampere or higher
             NVIDIA architecture. This is an experimental API and it may change.
@@ -240,8 +255,10 @@ class TrainingArguments:
             Whether to use full float16 evaluation instead of 32-bit. This will be faster and save memory but can harm
             metric values.
         tf32 (`bool`, *optional*):
-            Whether to enable tf32 mode, available in Ampere and newer GPU architectures. This is an experimental API
-            and it may change.
+            Whether to enable the TF32 mode, available in Ampere and newer GPU architectures. The default value depends
+            on PyTorch's version default of `torch.backends.cuda.matmul.allow_tf32`. For more details please refer to
+            the [TF32](https://huggingface.co/docs/transformers/performance#tf32) documentation. This is an
+            experimental API and it may change.
         local_rank (`int`, *optional*, defaults to -1):
             Rank of the process during distributed training.
         xpu_backend (`str`, *optional*):
@@ -321,6 +338,18 @@ class TrainingArguments:
 
             If a string is passed, it will be split on space. If a bool is passed, it will be converted to an empty
             list for `False` and `["simple"]` for `True`.
+        fsdp (`bool`, `str` or list of [`~trainer_utils.FSDPOption`], *optional*, defaults to `False`):
+            Use PyTorch Distributed Parallel Training (in distributed training only).
+
+            A list of options along the following:
+
+            - `"full_shard"`: Shard parameters, gradients and optimizer states.
+            - `"shard_grad_op"`: Shard optimizer states and gradients.
+            - `"offload"`: Offload parameters and gradients to CPUs (only compatible with `"full_shard"` and
+              `"shard_grad_op"`).
+            - `"auto_wrap"`: Automatically recursively wrap layers with FSDP using `default_auto_wrap_policy`.
+        fsdp_min_num_params (`int`, *optional*, defaults to `0`):
+            FSDP's minimum number of parameters for Default Auto Wrapping. (useful only when `fsdp` field is passed).
         deepspeed (`str` or `dict`, *optional*):
             Use [Deepspeed](https://github.com/microsoft/deepspeed). This is an experimental feature and its API may
             evolve in the future. The value is either the location of DeepSpeed json config file (e.g.,
@@ -365,13 +394,22 @@ class TrainingArguments:
             Whether to skip adding of memory profiler reports to metrics. This is skipped by default because it slows
             down the training and evaluation speed.
         push_to_hub (`bool`, *optional*, defaults to `False`):
-            Whether or not to upload the trained model to the hub after training. If this is activated, and
-            `output_dir` exists, it needs to be a local clone of the repository to which the [`Trainer`] will be
+            Whether or not to push the model to the Hub every time the model is saved. If this is activated,
+            `output_dir` will begin a git directory synced with the the repo (determined by `hub_model_id`) and the
+            content will be pushed each time a save is triggered (depending on your `save_strategy`). Calling
+            [`~Trainer.save_model`] will also trigger a push.
+
+            <Tip warning={true}>
+
+            If `output_dir` exists, it needs to be a local clone of the repository to which the [`Trainer`] will be
             pushed.
+
+            </Tip>
+
         resume_from_checkpoint (`str`, *optional*):
             The path to a folder with a valid checkpoint for your model. This argument is not directly used by
             [`Trainer`], it's intended to be used by your training/evaluation scripts instead. See the [example
-            scripts](https://github.com/huggingface/transformers/tree/master/examples) for more details.
+            scripts](https://github.com/huggingface/transformers/tree/main/examples) for more details.
         hub_model_id (`str`, *optional*):
             The name of the repository to keep in sync with the local *output_dir*. It can be a simple model ID in
             which case the model will be pushed in your namespace. Otherwise it should be the whole repository name,
@@ -384,7 +422,7 @@ class TrainingArguments:
             Defines the scope of what is pushed to the Hub and when. Possible values are:
 
             - `"end"`: push the model, its configuration, the tokenizer (if passed along to the [`Trainer`]) and a
-              draft of a model card at the end of training.
+              draft of a model card when the [`~Trainer.save_model`] method is called.
             - `"every_save"`: push the model, its configuration, the tokenizer (if passed along to the [`Trainer`]) and
               a draft of a model card each time there is a model save. The pushes are asynchronous to not block
               training, and in case the save are very frequent, a new push is only attempted if the previous one is
@@ -398,8 +436,16 @@ class TrainingArguments:
         hub_token (`str`, *optional*):
             The token to use to push the model to the Hub. Will default to the token in the cache folder obtained with
             `huggingface-cli login`.
+        hub_private_repo (`bool`, *optional*, defaults to `False`):
+            If True, the Hub repo will be set to private.
         gradient_checkpointing (`bool`, *optional*, defaults to `False`):
             If True, use gradient checkpointing to save memory at the expense of slower backward pass.
+        include_inputs_for_metrics (`bool`, *optional*, defaults to `False`):
+            Whether or not the inputs will be passed to the `compute_metrics` function. This is intended for metrics
+            that need inputs, predictions and references for scoring calculation in Metric class.
+        auto_find_batch_size (`bool`, *optional*, defaults to `False`)
+            Whether to find a batch size that will fit into memory automatically through exponential decay, avoiding
+            CUDA Out-of-Memory errors. Requires accelerate to be installed (`pip install accelerate`)
     """
 
     output_dir: str = field(
@@ -458,6 +504,13 @@ class TrainingArguments:
         metadata={"help": "Number of predictions steps to accumulate before moving the tensors to the CPU."},
     )
 
+    eval_delay: Optional[float] = field(
+        default=0,
+        metadata={
+            "help": "Number of epochs or steps to wait for before the first evaluation can be performed, depending on the evaluation_strategy."
+        },
+    )
+
     learning_rate: float = field(default=5e-5, metadata={"help": "The initial learning rate for AdamW."})
     weight_decay: float = field(default=0.0, metadata={"help": "Weight decay for AdamW if we apply some."})
     adam_beta1: float = field(default=0.9, metadata={"help": "Beta1 for AdamW optimizer"})
@@ -506,7 +559,7 @@ class TrainingArguments:
     )
     logging_first_step: bool = field(default=False, metadata={"help": "Log the first global_step"})
     logging_steps: int = field(default=500, metadata={"help": "Log every X updates steps."})
-    logging_nan_inf_filter: str = field(default=True, metadata={"help": "Filter nan and inf losses for logging."})
+    logging_nan_inf_filter: bool = field(default=True, metadata={"help": "Filter nan and inf losses for logging."})
     save_strategy: IntervalStrategy = field(
         default="steps",
         metadata={"help": "The checkpoint save strategy to use."},
@@ -529,6 +582,7 @@ class TrainingArguments:
     )
     no_cuda: bool = field(default=False, metadata={"help": "Do not use CUDA even when it is available"})
     seed: int = field(default=42, metadata={"help": "Random seed that will be set at the beginning of training."})
+    data_seed: int = field(default=None, metadata={"help": "Random seed to be used with data samplers."})
     bf16: bool = field(
         default=False,
         metadata={
@@ -642,8 +696,23 @@ class TrainingArguments:
         metadata={
             "help": "Whether or not to use sharded DDP training (in distributed training only). The base option "
             "should be `simple`, `zero_dp_2` or `zero_dp_3` and you can add CPU-offload to `zero_dp_2` or `zero_dp_3` "
-            "like this: zero_dp_2 offload` or `zero_dp_3 offload`. You can add auto-wrap to `zero_dp_2` or "
+            "like this: zero_dp_2 offload` or `zero_dp_3 offload`. You can add auto-wrap to `zero_dp_2` or `zero_dp_3` "
             "with the same syntax: zero_dp_2 auto_wrap` or `zero_dp_3 auto_wrap`.",
+        },
+    )
+    fsdp: str = field(
+        default="",
+        metadata={
+            "help": "Whether or not to use PyTorch Fully Sharded Data Parallel (FSDP) training (in distributed training only). The base option "
+            "should be `full_shard` or `shard_grad_op` and you can add CPU-offload to `full_shard` or `shard_grad_op` "
+            "like this: full_shard offload` or `shard_grad_op offload`. You can add auto-wrap to `full_shard` or `shard_grad_op` "
+            "with the same syntax: full_shard auto_wrap` or `shard_grad_op auto_wrap`.",
+        },
+    )
+    fsdp_min_num_params: int = field(
+        default=0,
+        metadata={
+            "help": "FSDP's minimum number of parameters for Default Auto Wrapping. (useful only when `fsdp` field is passed)."
         },
     )
     deepspeed: Optional[str] = field(
@@ -709,11 +778,15 @@ class TrainingArguments:
         metadata={"help": "The hub strategy to use when `--push_to_hub` is activated."},
     )
     hub_token: str = field(default=None, metadata={"help": "The token to use to push to the Model Hub."})
+    hub_private_repo: bool = field(default=False, metadata={"help": "Whether the model repository is private or not."})
     gradient_checkpointing: bool = field(
         default=False,
         metadata={
             "help": "If True, use gradient checkpointing to save memory at the expense of slower backward pass."
         },
+    )
+    include_inputs_for_metrics: bool = field(
+        default=False, metadata={"help": "Whether or not the inputs will be passed to the `compute_metrics` function."}
     )
     # Deprecated arguments
     fp16_backend: str = field(
@@ -731,6 +804,13 @@ class TrainingArguments:
     mp_parameters: str = field(
         default="",
         metadata={"help": "Used by the SageMaker launcher to send mp-specific args. Ignored in Trainer"},
+    )
+
+    auto_find_batch_size: bool = field(
+        default=False,
+        metadata={
+            "help": "Whether to automatically decrease the batch size in half and rerun the training loop again each time a CUDA Out-of-Memory was reached"
+        },
     )
 
     def __post_init__(self):
@@ -895,6 +975,21 @@ class TrainingArguments:
         elif ShardedDDPOption.ZERO_DP_2 in self.sharded_ddp and ShardedDDPOption.ZERO_DP_3 in self.sharded_ddp:
             raise ValueError("`--sharded_ddp zero_dp_2` is not compatible with `--sharded_ddp zero_dp_3`.")
 
+        if isinstance(self.fsdp, bool):
+            self.fsdp = "full_shard" if self.fsdp else ""
+        if isinstance(self.fsdp, str):
+            self.fsdp = [FSDPOption(s) for s in self.fsdp.split()]
+        if self.fsdp == [FSDPOption.OFFLOAD]:
+            raise ValueError(
+                "`--fsdp offload` can't work on its own. It needs to be added to `--fsdp full_shard` or "
+                '`--fsdp shard_grad_op`. For example, `--fsdp "full_shard offload"`.'
+            )
+        elif FSDPOption.FULL_SHARD in self.fsdp and FSDPOption.SHARD_GRAD_OP in self.sharded_ddp:
+            raise ValueError("`--fsdp full_shard` is not compatible with `--fsdp shard_grad_op`.")
+
+        if len(self.fsdp) == 0 and self.fsdp_min_num_params > 0:
+            warnings.warn("`--fsdp_min_num_params` is useful only when `--fsdp` is specified.")
+
         if self.tpu_metrics_debug:
             warnings.warn(
                 "using `--tpu_metrics_debug` is deprecated and will be removed in version 5 of 🤗 Transformers. Use `--debug tpu_metrics_debug` instead",
@@ -997,10 +1092,15 @@ class TrainingArguments:
     @torch_required
     def _setup_devices(self) -> "torch.device":
         logger.info("PyTorch: setting up devices")
+        if torch.distributed.is_available() and torch.distributed.is_initialized() and self.local_rank == -1:
+            logger.warning(
+                "torch.distributed process group is initialized, but local_rank == -1. "
+                "In order to use Torch DDP, launch your script with `python -m torch.distributed.launch"
+            )
         if self.no_cuda:
             device = torch.device("cpu")
             self._n_gpu = 0
-            if self.local_rank != -1:
+            if self.local_rank != -1 and not torch.distributed.is_initialized():
                 # Initializes distributed backend for cpu
                 if self.xpu_backend not in ("mpi", "ccl"):
                     raise ValueError(
@@ -1016,8 +1116,8 @@ class TrainingArguments:
             device = torch.device("cuda", local_rank)
             self._n_gpu = 1
         elif is_sagemaker_dp_enabled():
-            sm_dist.init_process_group()
-            self.local_rank = sm_dist.get_local_rank()
+            dist.init_process_group(backend="smddp")
+            self.local_rank = int(os.getenv("SMDATAPARALLEL_LOCAL_RANK"))
             device = torch.device("cuda", self.local_rank)
             self._n_gpu = 1
         elif self.deepspeed:
@@ -1051,7 +1151,8 @@ class TrainingArguments:
         else:
             # Here, we'll use torch.distributed.
             # Initializes the distributed backend which will take care of synchronizing nodes/GPUs
-            torch.distributed.init_process_group(backend="nccl")
+            if not torch.distributed.is_initialized():
+                torch.distributed.init_process_group(backend="nccl")
             device = torch.device("cuda", self.local_rank)
             self._n_gpu = 1
 
@@ -1116,9 +1217,9 @@ class TrainingArguments:
         if is_torch_tpu_available():
             return xm.xrt_world_size()
         elif is_sagemaker_mp_enabled():
-            return smp.dp_size()
+            return smp.dp_size() if not smp.state.cfg.prescaled_batch else smp.rdp_size()
         elif is_sagemaker_dp_enabled():
-            return sm_dist.get_world_size()
+            return dist.get_world_size()
         elif self.local_rank != -1:
             return torch.distributed.get_world_size()
         return 1
@@ -1132,9 +1233,9 @@ class TrainingArguments:
         if is_torch_tpu_available():
             return xm.get_ordinal()
         elif is_sagemaker_mp_enabled():
-            return smp.dp_rank()
+            return smp.dp_rank() if not smp.state.cfg.prescaled_batch else smp.rdp_rank()
         elif is_sagemaker_dp_enabled():
-            return sm_dist.get_rank()
+            return dist.get_rank()
         elif self.local_rank != -1:
             return torch.distributed.get_rank()
         return 0
@@ -1150,7 +1251,7 @@ class TrainingArguments:
         elif is_sagemaker_mp_enabled():
             return smp.local_rank()
         elif is_sagemaker_dp_enabled():
-            return sm_dist.get_rank()
+            return dist.get_rank()
         elif self.local_rank != -1:
             return self.local_rank
         return 0
@@ -1234,12 +1335,14 @@ class TrainingArguments:
 
         """
         if is_torch_available() and self.world_size > 1:
+            main_process_desc = "main process"
             if local:
                 is_main_process = self.local_process_index == 0
                 main_process_desc = "main local process"
+            elif is_sagemaker_mp_enabled():
+                is_main_process = smp.rank() == 0
             else:
                 is_main_process = self.process_index == 0
-                main_process_desc = "main process"
 
             try:
                 if not is_main_process:
@@ -1248,7 +1351,7 @@ class TrainingArguments:
                     if is_torch_tpu_available():
                         xm.rendezvous(desc)
                     elif is_sagemaker_dp_enabled():
-                        sm_dist.barrier()
+                        dist.barrier()
                     else:
                         torch.distributed.barrier()
                 yield
@@ -1259,7 +1362,7 @@ class TrainingArguments:
                     if is_torch_tpu_available():
                         xm.rendezvous(desc)
                     elif is_sagemaker_dp_enabled():
-                        sm_dist.barrier()
+                        dist.barrier()
                     else:
                         torch.distributed.barrier()
         else:

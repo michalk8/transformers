@@ -15,28 +15,23 @@
 """ TensorFlow Hubert model."""
 import inspect
 import warnings
+from collections.abc import Mapping
 from typing import Any, Dict, Optional, Tuple, Union
 
 import numpy as np
 import tensorflow as tf
 
 from ...activations_tf import get_tf_activation
-from ...file_utils import (
+from ...modeling_tf_outputs import TFBaseModelOutput, TFCausalLMOutput
+from ...modeling_tf_utils import TFPreTrainedModel, booleans_processing, get_initializer, keras_serializable
+from ...tf_utils import shape_list, stable_softmax
+from ...utils import (
     ModelOutput,
     add_start_docstrings,
     add_start_docstrings_to_model_forward,
+    logging,
     replace_return_docstrings,
 )
-from ...modeling_tf_outputs import TFBaseModelOutput, TFCausalLMOutput
-from ...modeling_tf_utils import (
-    TFPreTrainedModel,
-    booleans_processing,
-    get_initializer,
-    keras_serializable,
-    shape_list,
-)
-from ...tokenization_utils_base import BatchEncoding
-from ...utils import logging
 from .configuration_hubert import HubertConfig
 
 
@@ -102,7 +97,7 @@ def input_values_processing(func, config, input_values, **kwargs):
                 raise ValueError(
                     f"Data of type {type(input)} is not allowed only {allowed_types} is accepted for {parameter_names[i]}."
                 )
-    elif isinstance(input_values, (dict, BatchEncoding)):
+    elif isinstance(input_values, Mapping):
         if "inputs" in input_values:
             warnings.warn(
                 "The `inputs` argument is deprecated and will be removed in a future version, use `input_values` instead.",
@@ -736,8 +731,12 @@ class TFHubertAttention(tf.keras.layers.Layer):
         self.num_heads = num_heads
         self.dropout = tf.keras.layers.Dropout(dropout)
         self.head_dim = embed_dim // num_heads
-        assert self.head_dim * num_heads == self.embed_dim, "embed_dim must be divisible by num_heads"
-        self.scaling = self.head_dim ** -0.5
+        if (self.head_dim * num_heads) != self.embed_dim:
+            raise ValueError(
+                f"embed_dim must be divisible by num_heads (got `embed_dim`: {self.embed_dim}"
+                f" and `num_heads`: {num_heads})."
+            )
+        self.scaling = self.head_dim**-0.5
         self.is_decoder = is_decoder
 
         self.k_proj = tf.keras.layers.Dense(embed_dim, use_bias=bias, name="k_proj")
@@ -755,7 +754,7 @@ class TFHubertAttention(tf.keras.layers.Layer):
         past_key_value: Optional[Tuple[Tuple[tf.Tensor]]] = None,
         attention_mask: Optional[tf.Tensor] = None,
         layer_head_mask: Optional[tf.Tensor] = None,
-        training=False,
+        training: Optional[bool] = False,
     ) -> Tuple[tf.Tensor, Optional[tf.Tensor]]:
         """Input shape: Batch x Time x Channel"""
 
@@ -827,7 +826,7 @@ class TFHubertAttention(tf.keras.layers.Layer):
             attn_weights = tf.reshape(attn_weights, (bsz, self.num_heads, tgt_len, src_len)) + attention_mask
             attn_weights = tf.reshape(attn_weights, (bsz * self.num_heads, tgt_len, src_len))
 
-        attn_weights = tf.nn.softmax(attn_weights, axis=-1)
+        attn_weights = stable_softmax(attn_weights, axis=-1)
 
         if layer_head_mask is not None:
             # The tf.debugging asserts are not compliant with XLA then they
@@ -1289,6 +1288,13 @@ class TFHubertPreTrainedModel(TFPreTrainedModel):
         }
         return dummy_inputs
 
+    def __init__(self, config, *inputs, **kwargs):
+        super().__init__(config, *inputs, **kwargs)
+        logger.warning(
+            f"\n{self.__class__.__name__} has backpropagation operations that are NOT supported on CPU. If you wish "
+            "to train/fine-tine this model, you need a GPU or a TPU"
+        )
+
     @tf.function
     def serving(self, inputs):
         output = self.call(input_values=inputs, training=False)
@@ -1381,8 +1387,8 @@ HUBERT_INPUTS_DOCSTRING = r"""
             more detail. This argument can be used only in eager mode, in graph mode the value in the config will be
             used instead.
         return_dict (`bool`, *optional*):
-            Whether or not to return a [`~file_utils.ModelOutput`] instead of a plain tuple. This argument can be used
-            in eager mode, in graph mode the value will always be set to True.
+            Whether or not to return a [`~utils.ModelOutput`] instead of a plain tuple. This argument can be used in
+            eager mode, in graph mode the value will always be set to True.
         training (`bool`, *optional*, defaults to `False``):
             Whether or not to use the model in training mode (some modules like dropout modules have different
             behaviors between training and evaluation).

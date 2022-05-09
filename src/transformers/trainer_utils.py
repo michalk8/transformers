@@ -29,14 +29,14 @@ from typing import Any, Dict, NamedTuple, Optional, Tuple, Union
 
 import numpy as np
 
-from .file_utils import (
+from .utils import (
     ExplicitEnum,
     is_psutil_available,
-    is_sagemaker_dp_enabled,
     is_tf_available,
     is_torch_available,
     is_torch_cuda_available,
     is_torch_tpu_available,
+    requires_backends,
 )
 
 
@@ -64,17 +64,43 @@ def set_seed(seed: int):
         tf.random.set_seed(seed)
 
 
-class EvalPrediction(NamedTuple):
+class EvalPrediction:
     """
     Evaluation output (always contains labels), to be used to compute metrics.
 
     Parameters:
         predictions (`np.ndarray`): Predictions of the model.
         label_ids (`np.ndarray`): Targets to be matched.
+        inputs (`np.ndarray`, *optional*)
     """
 
-    predictions: Union[np.ndarray, Tuple[np.ndarray]]
-    label_ids: Union[np.ndarray, Tuple[np.ndarray]]
+    def __init__(
+        self,
+        predictions: Union[np.ndarray, Tuple[np.ndarray]],
+        label_ids: Union[np.ndarray, Tuple[np.ndarray]],
+        inputs: Optional[Union[np.ndarray, Tuple[np.ndarray]]] = None,
+    ):
+        self.predictions = predictions
+        self.label_ids = label_ids
+        self.inputs = inputs
+
+    def __iter__(self):
+        if self.inputs is not None:
+            return iter((self.predictions, self.label_ids, self.inputs))
+        else:
+            return iter((self.predictions, self.label_ids))
+
+    def __getitem__(self, idx):
+        if idx < 0 or idx > 2:
+            raise IndexError("tuple index out of range")
+        if idx == 2 and self.inputs is None:
+            raise IndexError("tuple index out of range")
+        if idx == 0:
+            return self.predictions
+        elif idx == 1:
+            return self.label_ids
+        elif idx == 2:
+            return self.inputs
 
 
 class EvalLoopOutput(NamedTuple):
@@ -210,16 +236,36 @@ def default_hp_space_sigopt(trial):
     ]
 
 
+def default_hp_space_wandb(trial) -> Dict[str, float]:
+    from .integrations import is_wandb_available
+
+    if not is_wandb_available():
+        raise ImportError("This function needs wandb installed: `pip install wandb`")
+
+    return {
+        "method": "random",
+        "metric": {"name": "objective", "goal": "minimize"},
+        "parameters": {
+            "learning_rate": {"distribution": "uniform", "min": 1e-6, "max": 1e-4},
+            "num_train_epochs": {"distribution": "int_uniform", "min": 1, "max": 6},
+            "seed": {"distribution": "int_uniform", "min": 1, "max": 40},
+            "per_device_train_batch_size": {"values": [4, 8, 16, 32, 64]},
+        },
+    }
+
+
 class HPSearchBackend(ExplicitEnum):
     OPTUNA = "optuna"
     RAY = "ray"
     SIGOPT = "sigopt"
+    WANDB = "wandb"
 
 
 default_hp_space = {
     HPSearchBackend.OPTUNA: default_hp_space_optuna,
     HPSearchBackend.RAY: default_hp_space_ray,
     HPSearchBackend.SIGOPT: default_hp_space_sigopt,
+    HPSearchBackend.WANDB: default_hp_space_wandb,
 }
 
 
@@ -243,10 +289,6 @@ def total_processes_number(local_rank):
         import torch_xla.core.xla_model as xm
 
         return xm.xrt_world_size()
-    elif is_sagemaker_dp_enabled():
-        import smdistributed.dataparallel.torch.distributed as dist
-
-        return dist.get_world_size()
     elif local_rank != -1 and is_torch_available():
         import torch
 
@@ -314,6 +356,7 @@ class TrainerMemoryTracker:
     stages = {
         "__init__": "init",
         "train": "train",
+        "_inner_training_loop": "train",
         "evaluate": "eval",
         "predict": "test",
     }
@@ -499,6 +542,17 @@ class TrainerMemoryTracker:
             self.update_metrics(stage, metrics)
 
 
+def has_length(dataset):
+    """
+    Checks if the dataset implements __len__() and it doesn't raise an error
+    """
+    try:
+        return len(dataset) is not None
+    except TypeError:
+        # TypeError: len() of unsized object
+        return False
+
+
 def denumpify_detensorize(metrics):
     """
     Recursively calls `.item()` on the element of the dictionary passed
@@ -528,5 +582,43 @@ class ShardedDDPOption(ExplicitEnum):
     SIMPLE = "simple"
     ZERO_DP_2 = "zero_dp_2"
     ZERO_DP_3 = "zero_dp_3"
+    OFFLOAD = "offload"
+    AUTO_WRAP = "auto_wrap"
+
+
+def find_executable_batch_size(
+    function: callable = None, starting_batch_size: int = 128, auto_find_batch_size: bool = False
+):
+    """
+    Args:
+    A basic decorator that will try to execute `function`. If it fails from exceptions related to out-of-memory or
+    CUDNN, the batch size is cut in half and passed to `function` `function` must take in a `batch_size` parameter as
+    its first argument.
+        function (`callable`, *optional*)
+            A function to wrap
+        starting_batch_size (`int`, *optional*)
+            The batch size to try and fit into memory
+        auto_find_batch_size (`bool`, *optional*)
+            If False, will just execute `function`
+    """
+    if function is None:
+        return functools.partial(
+            find_executable_batch_size,
+            starting_batch_size=starting_batch_size,
+            auto_find_batch_size=auto_find_batch_size,
+        )
+
+    if auto_find_batch_size:
+        requires_backends(find_executable_batch_size, "accelerate")
+        import accelerate.memory_utils as mem_utils
+
+        return mem_utils.find_executable_batch_size(function=function, starting_batch_size=starting_batch_size)
+
+    return functools.partial(function, batch_size=starting_batch_size)
+
+
+class FSDPOption(ExplicitEnum):
+    FULL_SHARD = "full_shard"
+    SHARD_GRAD_OP = "shard_grad_op"
     OFFLOAD = "offload"
     AUTO_WRAP = "auto_wrap"

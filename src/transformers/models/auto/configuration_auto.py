@@ -20,9 +20,8 @@ from collections import OrderedDict
 from typing import List, Union
 
 from ...configuration_utils import PretrainedConfig
-from ...file_utils import CONFIG_NAME
-from ...utils import logging
-from .dynamic import get_class_from_dynamic_module
+from ...dynamic_module_utils import get_class_from_dynamic_module
+from ...utils import CONFIG_NAME, logging
 
 
 logger = logging.get_logger(__name__)
@@ -30,11 +29,25 @@ logger = logging.get_logger(__name__)
 CONFIG_MAPPING_NAMES = OrderedDict(
     [
         # Add configs here
+        ("yolos", "YolosConfig"),
+        ("tapex", "BartConfig"),
+        ("dpt", "DPTConfig"),
+        ("decision_transformer", "DecisionTransformerConfig"),
+        ("glpn", "GLPNConfig"),
+        ("maskformer", "MaskFormerConfig"),
+        ("decision_transformer", "DecisionTransformerConfig"),
+        ("poolformer", "PoolFormerConfig"),
+        ("convnext", "ConvNextConfig"),
+        ("van", "VanConfig"),
+        ("resnet", "ResNetConfig"),
+        ("regnet", "RegNetConfig"),
+        ("yoso", "YosoConfig"),
         ("swin", "SwinConfig"),
         ("vilt", "ViltConfig"),
         ("vit_mae", "ViTMAEConfig"),
         ("realm", "RealmConfig"),
         ("nystromformer", "NystromformerConfig"),
+        ("xglm", "XGLMConfig"),
         ("imagegpt", "ImageGPTConfig"),
         ("qdqbert", "QDQBertConfig"),
         ("vision-encoder-decoder", "VisionEncoderDecoderConfig"),
@@ -45,7 +58,9 @@ CONFIG_MAPPING_NAMES = OrderedDict(
         ("perceiver", "PerceiverConfig"),
         ("gptj", "GPTJConfig"),
         ("layoutlmv2", "LayoutLMv2Config"),
+        ("plbart", "PLBartConfig"),
         ("beit", "BeitConfig"),
+        ("data2vec-vision", "Data2VecVisionConfig"),
         ("rembert", "RemBertConfig"),
         ("visual_bert", "VisualBertConfig"),
         ("canine", "CanineConfig"),
@@ -74,6 +89,7 @@ CONFIG_MAPPING_NAMES = OrderedDict(
         ("albert", "AlbertConfig"),
         ("bert-generation", "BertGenerationConfig"),
         ("camembert", "CamembertConfig"),
+        ("xlm-roberta-xl", "XLMRobertaXLConfig"),
         ("xlm-roberta", "XLMRobertaConfig"),
         ("pegasus", "PegasusConfig"),
         ("marian", "MarianConfig"),
@@ -115,17 +131,30 @@ CONFIG_MAPPING_NAMES = OrderedDict(
         ("unispeech-sat", "UniSpeechSatConfig"),
         ("unispeech", "UniSpeechConfig"),
         ("wavlm", "WavLMConfig"),
+        ("data2vec-audio", "Data2VecAudioConfig"),
+        ("data2vec-text", "Data2VecTextConfig"),
     ]
 )
 
 CONFIG_ARCHIVE_MAP_MAPPING_NAMES = OrderedDict(
     [
-        # Add archive maps here
+        # Add archive maps here)
+        ("yolos", "YOLOS_PRETRAINED_CONFIG_ARCHIVE_MAP"),
+        ("dpt", "DPT_PRETRAINED_CONFIG_ARCHIVE_MAP"),
+        ("glpn", "GLPN_PRETRAINED_CONFIG_ARCHIVE_MAP"),
+        ("maskformer", "MASKFORMER_PRETRAINED_CONFIG_ARCHIVE_MAP"),
+        ("poolformer", "POOLFORMER_PRETRAINED_CONFIG_ARCHIVE_MAP"),
+        ("convnext", "CONVNEXT_PRETRAINED_CONFIG_ARCHIVE_MAP"),
+        ("van", "VAN_PRETRAINED_CONFIG_ARCHIVE_MAP"),
+        ("resnet", "RESNET_PRETRAINED_CONFIG_ARCHIVE_MAP"),
+        ("regnet", "REGNET_PRETRAINED_CONFIG_ARCHIVE_MAP"),
+        ("yoso", "YOSO_PRETRAINED_CONFIG_ARCHIVE_MAP"),
         ("swin", "SWIN_PRETRAINED_CONFIG_ARCHIVE_MAP"),
         ("vilt", "VILT_PRETRAINED_CONFIG_ARCHIVE_MAP"),
         ("vit_mae", "VIT_MAE_PRETRAINED_CONFIG_ARCHIVE_MAP"),
         ("realm", "REALM_PRETRAINED_CONFIG_ARCHIVE_MAP"),
         ("nystromformer", "NYSTROMFORMER_PRETRAINED_CONFIG_ARCHIVE_MAP"),
+        ("xglm", "XGLM_PRETRAINED_CONFIG_ARCHIVE_MAP"),
         ("imagegpt", "IMAGEGPT_PRETRAINED_CONFIG_ARCHIVE_MAP"),
         ("qdqbert", "QDQBERT_PRETRAINED_CONFIG_ARCHIVE_MAP"),
         ("fnet", "FNET_PRETRAINED_CONFIG_ARCHIVE_MAP"),
@@ -134,7 +163,9 @@ CONFIG_ARCHIVE_MAP_MAPPING_NAMES = OrderedDict(
         ("perceiver", "PERCEIVER_PRETRAINED_CONFIG_ARCHIVE_MAP"),
         ("gptj", "GPTJ_PRETRAINED_CONFIG_ARCHIVE_MAP"),
         ("layoutlmv2", "LAYOUTLMV2_PRETRAINED_CONFIG_ARCHIVE_MAP"),
+        ("plbart", "PLBART_PRETRAINED_CONFIG_ARCHIVE_MAP"),
         ("beit", "BEIT_PRETRAINED_CONFIG_ARCHIVE_MAP"),
+        ("data2vec-vision", "DATA2VEC_VISION_PRETRAINED_CONFIG_ARCHIVE_MAP"),
         ("rembert", "REMBERT_PRETRAINED_CONFIG_ARCHIVE_MAP"),
         ("visual_bert", "VISUAL_BERT_PRETRAINED_CONFIG_ARCHIVE_MAP"),
         ("canine", "CANINE_PRETRAINED_CONFIG_ARCHIVE_MAP"),
@@ -166,6 +197,8 @@ CONFIG_ARCHIVE_MAP_MAPPING_NAMES = OrderedDict(
         ("xlnet", "XLNET_PRETRAINED_CONFIG_ARCHIVE_MAP"),
         ("xlm", "XLM_PRETRAINED_CONFIG_ARCHIVE_MAP"),
         ("roberta", "ROBERTA_PRETRAINED_CONFIG_ARCHIVE_MAP"),
+        ("data2vec-text", "DATA2VEC_TEXT_PRETRAINED_CONFIG_ARCHIVE_MAP"),
+        ("data2vec-audio", "DATA2VEC_AUDIO_PRETRAINED_CONFIG_ARCHIVE_MAP"),
         ("distilbert", "DISTILBERT_PRETRAINED_CONFIG_ARCHIVE_MAP"),
         ("albert", "ALBERT_PRETRAINED_CONFIG_ARCHIVE_MAP"),
         ("camembert", "CAMEMBERT_PRETRAINED_CONFIG_ARCHIVE_MAP"),
@@ -200,11 +233,24 @@ CONFIG_ARCHIVE_MAP_MAPPING_NAMES = OrderedDict(
 MODEL_NAMES_MAPPING = OrderedDict(
     [
         # Add full (and cased) model names here
+        ("yolos", "YOLOS"),
+        ("tapex", "TAPEX"),
+        ("dpt", "DPT"),
+        ("decision_transformer", "Decision Transformer"),
+        ("glpn", "GLPN"),
+        ("maskformer", "MaskFormer"),
+        ("poolformer", "PoolFormer"),
+        ("convnext", "ConvNext"),
+        ("van", "VAN"),
+        ("resnet", "ResNet"),
+        ("regnet", "RegNet"),
+        ("yoso", "YOSO"),
         ("swin", "Swin"),
         ("vilt", "ViLT"),
         ("vit_mae", "ViTMAE"),
         ("realm", "Realm"),
         ("nystromformer", "Nystromformer"),
+        ("xglm", "XGLM"),
         ("imagegpt", "ImageGPT"),
         ("qdqbert", "QDQBert"),
         ("vision-encoder-decoder", "Vision Encoder decoder"),
@@ -215,6 +261,7 @@ MODEL_NAMES_MAPPING = OrderedDict(
         ("perceiver", "Perceiver"),
         ("gptj", "GPT-J"),
         ("beit", "BEiT"),
+        ("plbart", "PLBart"),
         ("rembert", "RemBERT"),
         ("layoutlmv2", "LayoutLMv2"),
         ("visual_bert", "VisualBert"),
@@ -244,6 +291,7 @@ MODEL_NAMES_MAPPING = OrderedDict(
         ("bert-generation", "Bert Generation"),
         ("camembert", "CamemBERT"),
         ("xlm-roberta", "XLM-RoBERTa"),
+        ("xlm-roberta-xl", "XLM-RoBERTa-XL"),
         ("pegasus", "Pegasus"),
         ("blenderbot", "Blenderbot"),
         ("marian", "Marian"),
@@ -304,10 +352,21 @@ MODEL_NAMES_MAPPING = OrderedDict(
         ("xlsr_wav2vec2", "XLSR-Wav2Vec2"),
         ("mluke", "mLUKE"),
         ("layoutxlm", "LayoutXLM"),
+        ("data2vec-audio", "Data2VecAudio"),
+        ("data2vec-text", "Data2VecText"),
+        ("data2vec-vision", "Data2VecVision"),
+        ("dit", "DiT"),
     ]
 )
 
-SPECIAL_MODEL_TYPE_TO_MODULE_NAME = OrderedDict([("openai-gpt", "openai")])
+SPECIAL_MODEL_TYPE_TO_MODULE_NAME = OrderedDict(
+    [
+        ("openai-gpt", "openai"),
+        ("data2vec-audio", "data2vec"),
+        ("data2vec-text", "data2vec"),
+        ("data2vec-vision", "data2vec"),
+    ]
+)
 
 
 def model_type_to_module_name(key):
@@ -346,7 +405,13 @@ class _LazyConfigMapping(OrderedDict):
         module_name = model_type_to_module_name(key)
         if module_name not in self._modules:
             self._modules[module_name] = importlib.import_module(f".{module_name}", "transformers.models")
-        return getattr(self._modules[module_name], value)
+        if hasattr(self._modules[module_name], value):
+            return getattr(self._modules[module_name], value)
+
+        # Some of the mappings have entries model_type -> config of another model type. In that case we try to grab the
+        # object at the top level.
+        transformers_module = importlib.import_module("transformers")
+        return getattr(transformers_module, value)
 
     def keys(self):
         return list(self._mapping.keys()) + list(self._extra_content.keys())
@@ -553,7 +618,7 @@ class AutoConfig:
             proxies (`Dict[str, str]`, *optional*):
                 A dictionary of proxy servers to use by protocol or endpoint, e.g., `{'http': 'foo.bar:3128',
                 'http://hostname': 'foo.bar:4012'}`. The proxies are used on each request.
-            revision(`str`, *optional*, defaults to `"main"`):
+            revision (`str`, *optional*, defaults to `"main"`):
                 The specific model version to use. It can be a branch name, a tag name, or a commit id, since we use a
                 git-based system for storing models and other artifacts on huggingface.co, so `revision` can be any
                 identifier allowed by git.
@@ -615,7 +680,7 @@ class AutoConfig:
                     "the option `trust_remote_code=True` to remove this error."
                 )
             if kwargs.get("revision", None) is None:
-                logger.warn(
+                logger.warning(
                     "Explicitly passing a `revision` is encouraged when loading a configuration with custom code to "
                     "ensure no malicious code has been contributed in a newer revision."
                 )

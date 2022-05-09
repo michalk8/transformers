@@ -41,6 +41,8 @@ PRETRAINED_VOCAB_FILES_MAP = {
     }
 }
 
+
+# TODO(PVP) - this should be removed in Transformers v5
 PRETRAINED_POSITIONAL_EMBEDDINGS_SIZES = {
     "t5-small": 512,
     "t5-base": 512,
@@ -150,6 +152,24 @@ class T5Tokenizer(PreTrainedTokenizer):
 
         self.sp_model = spm.SentencePieceProcessor(**self.sp_model_kwargs)
         self.sp_model.Load(vocab_file)
+
+    @staticmethod
+    def _eventually_correct_t5_max_length(pretrained_model_name_or_path, max_model_length, init_max_model_length):
+        if pretrained_model_name_or_path in T5Tokenizer.max_model_input_sizes:
+            deprecated_max_model_length = T5Tokenizer.max_model_input_sizes[pretrained_model_name_or_path]
+            if init_max_model_length is not None and init_max_model_length != max_model_length:
+                return init_max_model_length
+            elif init_max_model_length is None:
+                warnings.warn(
+                    f"This tokenizer was incorrectly instantiated with a model max length of {deprecated_max_model_length} which will be corrected in Transformers v5.\n"
+                    f"For now, this behavior is kept to avoid breaking backwards compatibility when padding/encoding with `truncation is True`.\n"
+                    f"- Be aware that you SHOULD NOT rely on {pretrained_model_name_or_path} automatically truncating your input to {deprecated_max_model_length} when padding/encoding.\n"
+                    f"- If you want to encode/pad to sequences longer than {deprecated_max_model_length} you can either instantiate this tokenizer with `model_max_length` or pass `max_length` when encoding/padding.\n"
+                    f"- To avoid this warning, please instantiate this tokenizer with `model_max_length` set to your preferred value.",
+                    FutureWarning,
+                )
+
+        return max_model_length
 
     @property
     def vocab_size(self):
@@ -303,8 +323,11 @@ class T5Tokenizer(PreTrainedTokenizer):
             save_directory, (filename_prefix + "-" if filename_prefix else "") + VOCAB_FILES_NAMES["vocab_file"]
         )
 
-        if os.path.abspath(self.vocab_file) != os.path.abspath(out_vocab_file):
+        if os.path.abspath(self.vocab_file) != os.path.abspath(out_vocab_file) and os.path.isfile(self.vocab_file):
             copyfile(self.vocab_file, out_vocab_file)
-            logger.info(f"Copy vocab file to {out_vocab_file}")
+        elif not os.path.isfile(self.vocab_file):
+            with open(out_vocab_file, "wb") as fi:
+                content_spiece_model = self.sp_model.serialized_model_proto()
+                fi.write(content_spiece_model)
 
         return (out_vocab_file,)

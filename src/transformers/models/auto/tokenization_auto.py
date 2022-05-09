@@ -21,19 +21,11 @@ from collections import OrderedDict
 from typing import TYPE_CHECKING, Dict, Optional, Tuple, Union
 
 from ...configuration_utils import PretrainedConfig
-from ...file_utils import (
-    RepositoryNotFoundError,
-    RevisionNotFoundError,
-    cached_path,
-    hf_bucket_url,
-    is_offline_mode,
-    is_sentencepiece_available,
-    is_tokenizers_available,
-)
+from ...dynamic_module_utils import get_class_from_dynamic_module
 from ...tokenization_utils import PreTrainedTokenizer
 from ...tokenization_utils_base import TOKENIZER_CONFIG_FILE
 from ...tokenization_utils_fast import PreTrainedTokenizerFast
-from ...utils import logging
+from ...utils import get_file_from_repo, is_sentencepiece_available, is_tokenizers_available, logging
 from ..encoder_decoder import EncoderDecoderConfig
 from .auto_factory import _LazyAutoMapping
 from .configuration_auto import (
@@ -43,7 +35,6 @@ from .configuration_auto import (
     model_type_to_module_name,
     replace_list_option_in_docstrings,
 )
-from .dynamic import get_class_from_dynamic_module
 
 
 logger = logging.get_logger(__name__)
@@ -55,6 +46,8 @@ if TYPE_CHECKING:
 else:
     TOKENIZER_MAPPING_NAMES = OrderedDict(
         [
+            ("plbart", ("PLBartTokenizer" if is_sentencepiece_available() else None, None)),
+            ("realm", ("RealmTokenizer", "RealmTokenizerFast" if is_tokenizers_available() else None)),
             ("fnet", ("FNetTokenizer", "FNetTokenizerFast" if is_tokenizers_available() else None)),
             ("retribert", ("RetriBertTokenizer", "RetriBertTokenizerFast" if is_tokenizers_available() else None)),
             ("roformer", ("RoFormerTokenizer", "RoFormerTokenizerFast" if is_tokenizers_available() else None)),
@@ -112,6 +105,7 @@ else:
             ("marian", ("MarianTokenizer" if is_sentencepiece_available() else None, None)),
             ("blenderbot-small", ("BlenderbotSmallTokenizer", None)),
             ("blenderbot", ("BlenderbotTokenizer", "BlenderbotTokenizerFast")),
+            ("tapex", ("TapexTokenizer", None)),
             ("bart", ("BartTokenizer", "BartTokenizerFast")),
             ("longformer", ("LongformerTokenizer", "LongformerTokenizerFast" if is_tokenizers_available() else None)),
             ("roberta", ("RobertaTokenizer", "RobertaTokenizerFast" if is_tokenizers_available() else None)),
@@ -142,6 +136,7 @@ else:
             ("bert", ("BertTokenizer", "BertTokenizerFast" if is_tokenizers_available() else None)),
             ("openai-gpt", ("OpenAIGPTTokenizer", "OpenAIGPTTokenizerFast" if is_tokenizers_available() else None)),
             ("gpt2", ("GPT2Tokenizer", "GPT2TokenizerFast" if is_tokenizers_available() else None)),
+            ("gptj", ("GPT2Tokenizer", "GPT2TokenizerFast" if is_tokenizers_available() else None)),
             ("transfo-xl", ("TransfoXLTokenizer", None)),
             (
                 "xlnet",
@@ -156,7 +151,13 @@ else:
             ("fsmt", ("FSMTTokenizer", None)),
             ("bert-generation", ("BertGenerationTokenizer" if is_sentencepiece_available() else None, None)),
             ("deberta", ("DebertaTokenizer", "DebertaTokenizerFast" if is_tokenizers_available() else None)),
-            ("deberta-v2", ("DebertaV2Tokenizer" if is_sentencepiece_available() else None, None)),
+            (
+                "deberta-v2",
+                (
+                    "DebertaV2Tokenizer" if is_sentencepiece_available() else None,
+                    "DebertaV2TokenizerFast" if is_tokenizers_available() else None,
+                ),
+            ),
             ("rag", ("RagTokenizer", None)),
             ("xlm-prophetnet", ("XLMProphetNetTokenizer" if is_sentencepiece_available() else None, None)),
             ("speech_to_text", ("Speech2TextTokenizer" if is_sentencepiece_available() else None, None)),
@@ -233,6 +234,31 @@ else:
                     None,
                 ),
             ),
+            (
+                "xglm",
+                (
+                    "XGLMTokenizer" if is_sentencepiece_available() else None,
+                    "XGLMTokenizerFast" if is_tokenizers_available() else None,
+                ),
+            ),
+            ("visual_bert", ("BertTokenizer", "BertTokenizerFast" if is_tokenizers_available() else None)),
+            ("megatron-bert", ("BertTokenizer", "BertTokenizerFast" if is_tokenizers_available() else None)),
+            (
+                "nystromformer",
+                (
+                    "AlbertTokenizer" if is_sentencepiece_available() else None,
+                    "AlbertTokenizerFast" if is_tokenizers_available() else None,
+                ),
+            ),
+            ("xlm-roberta-xl", ("RobertaTokenizer", "RobertaTokenizerFast" if is_tokenizers_available() else None)),
+            (
+                "yoso",
+                (
+                    "AlbertTokenizer" if is_sentencepiece_available() else None,
+                    "AlbertTokenizerFast" if is_tokenizers_available() else None,
+                ),
+            ),
+            ("data2vec-text", ("RobertaTokenizer", "RobertaTokenizerFast" if is_tokenizers_available() else None)),
         ]
     )
 
@@ -298,7 +324,7 @@ def get_tokenizer_config(
         use_auth_token (`str` or *bool*, *optional*):
             The token to use as HTTP bearer authorization for remote files. If `True`, will use the token generated
             when running `transformers-cli login` (stored in `~/.huggingface`).
-        revision(`str`, *optional*, defaults to `"main"`):
+        revision (`str`, *optional*, defaults to `"main"`):
             The specific model version to use. It can be a branch name, a tag name, or a commit id, since we use a
             git-based system for storing models and other artifacts on huggingface.co, so `revision` can be any
             identifier allowed by git.
@@ -329,46 +355,18 @@ def get_tokenizer_config(
     tokenizer.save_pretrained("tokenizer-test")
     tokenizer_config = get_tokenizer_config("tokenizer-test")
     ```"""
-    if is_offline_mode() and not local_files_only:
-        logger.info("Offline mode: forcing local_files_only=True")
-        local_files_only = True
-
-    pretrained_model_name_or_path = str(pretrained_model_name_or_path)
-    if os.path.isdir(pretrained_model_name_or_path):
-        config_file = os.path.join(pretrained_model_name_or_path, TOKENIZER_CONFIG_FILE)
-    else:
-        config_file = hf_bucket_url(
-            pretrained_model_name_or_path, filename=TOKENIZER_CONFIG_FILE, revision=revision, mirror=None
-        )
-
-    try:
-        # Load from URL or cache if already cached
-        resolved_config_file = cached_path(
-            config_file,
-            cache_dir=cache_dir,
-            force_download=force_download,
-            proxies=proxies,
-            resume_download=resume_download,
-            local_files_only=local_files_only,
-            use_auth_token=use_auth_token,
-        )
-
-    except RepositoryNotFoundError as err:
-        logger.error(err)
-        raise EnvironmentError(
-            f"{pretrained_model_name_or_path} is not a local folder and is not a valid model identifier "
-            "listed on 'https://huggingface.co/models'\nIf this is a private repository, make sure to "
-            "pass a token having permission to this repo with `use_auth_token` or log in with "
-            "`huggingface-cli login` and pass `use_auth_token=True`."
-        )
-    except RevisionNotFoundError as err:
-        logger.error(err)
-        raise EnvironmentError(
-            f"{revision} is not a valid git identifier (branch name, tag name or commit id) that exists "
-            "for this model name. Check the model page at "
-            f"'https://huggingface.co/{pretrained_model_name_or_path}' for available revisions."
-        )
-    except EnvironmentError:
+    resolved_config_file = get_file_from_repo(
+        pretrained_model_name_or_path,
+        TOKENIZER_CONFIG_FILE,
+        cache_dir=cache_dir,
+        force_download=force_download,
+        resume_download=resume_download,
+        proxies=proxies,
+        use_auth_token=use_auth_token,
+        revision=revision,
+        local_files_only=local_files_only,
+    )
+    if resolved_config_file is None:
         logger.info("Could not locate the tokenizer configuration file, will try to use the model config instead.")
         return {}
 
@@ -430,7 +428,7 @@ class AutoTokenizer:
             proxies (`Dict[str, str]`, *optional*):
                 A dictionary of proxy servers to use by protocol or endpoint, e.g., `{'http': 'foo.bar:3128',
                 'http://hostname': 'foo.bar:4012'}`. The proxies are used on each request.
-            revision(`str`, *optional*, defaults to `"main"`):
+            revision (`str`, *optional*, defaults to `"main"`):
                 The specific model version to use. It can be a branch name, a tag name, or a commit id, since we use a
                 git-based system for storing models and other artifacts on huggingface.co, so `revision` can be any
                 identifier allowed by git.
@@ -498,7 +496,13 @@ class AutoTokenizer:
         # Next, let's try to use the tokenizer_config file to get the tokenizer class.
         tokenizer_config = get_tokenizer_config(pretrained_model_name_or_path, **kwargs)
         config_tokenizer_class = tokenizer_config.get("tokenizer_class")
-        tokenizer_auto_map = tokenizer_config.get("auto_map")
+        tokenizer_auto_map = None
+        if "auto_map" in tokenizer_config:
+            if isinstance(tokenizer_config["auto_map"], (tuple, list)):
+                # Legacy format for dynamic tokenizers
+                tokenizer_auto_map = tokenizer_config["auto_map"]
+            else:
+                tokenizer_auto_map = tokenizer_config["auto_map"].get("AutoTokenizer", None)
 
         # If that did not work, let's try to use the config.
         if config_tokenizer_class is None:
@@ -521,7 +525,7 @@ class AutoTokenizer:
                         "the option `trust_remote_code=True` to remove this error."
                     )
                 if kwargs.get("revision", None) is None:
-                    logger.warn(
+                    logger.warning(
                         "Explicitly passing a `revision` is encouraged when loading a model with custom code to ensure "
                         "no malicious code has been contributed in a newer revision."
                     )
