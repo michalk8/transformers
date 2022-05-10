@@ -2631,7 +2631,19 @@ class BigBirdForCausalLM(BigBirdPreTrainedModel):
         if past is not None:
             input_ids = input_ids[:, -1:]
 
-        return {"input_ids": input_ids, "attention_mask": attention_mask, "past_key_values": past}
+        position_ids = model_kwargs.get("position_ids", None)
+
+        if attention_mask is not None and position_ids is None:
+            # create position_ids on the fly for batch generation
+            position_ids = attention_mask.long().cumsum(-1) - 1
+            position_ids.masked_fill_(attention_mask == 0, 1)
+            if past:
+                position_ids = position_ids[:, -1].unsqueeze(-1)
+        else:
+            position_ids = None
+
+        return {"input_ids": input_ids, "attention_mask": attention_mask, "past_key_values": past,
+                "position_ids": position_ids, "use_cache": model_kwargs.get("use_cache")}
 
     def _reorder_cache(self, past, beam_idx):
         reordered_past = ()
